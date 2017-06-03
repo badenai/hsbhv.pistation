@@ -10,7 +10,7 @@ class StationServer(object):
         def __init__(self, server, url):
             WebSocketServerFactory.__init__(self, url)
             self.server = server
-            self.clientStartStation = None
+            self.stations = dict()
 
         def get_server(self):
             if self.server:
@@ -18,43 +18,53 @@ class StationServer(object):
             else:
                 raise Exception("StationServerFactory has no server.")
 
-        def register(self, client):
-            if client not in self.clients:
-                print("registered client {}".format(client.peer))
-                self.clients.append(client)
+        def register_station(self, station_type, station):
+            print("registered station {}".format(station_type))
+            self.stations[station_type] = station
 
-        def unregister(self, client):
-            if client in self.clients:
-                print("unregistered client {}".format(client.peer))
-                self.clients.remove(client)
+        def unregister(self, station_type, station):
+                print("unregistered station {}".format(station_type))
+                self.stations.remove(station_type)
 
         def broadcast(self, msg):
-            print("sending message to client...")
-            for c in self.clients:
-                c.sendMessage(msg.encode('utf8'))
-                print("message sent to {}".format(c.peer))
+            print("sending message to stations...")
+            for k, v in self.stations.iteritems():
+                v.sendMessage(msg.encode('utf8'))
+                print("message sent to {}".format(k))
 
     class StationServerProtocol(WebSocketServerProtocol):
-        async def onConnect(self, request):
-            print(request)
-            headers = {'MyCustomDynamicServerHeader1': 'Hello'}
-            if 'mycustomclientheader' in request.headers:
-                headers['MyCustomDynamicServerHeader2'] = request.headers['mycustomclientheader']
-            return (None, headers)
+        STARTSTATION = 'STARTSTATION'
+        AUTH = 'AUTH'
+        READY = 'READY'
+        RESET = 'RESET'
+        RFID = 'RFID'
+        GPIO = 'GPIO'
+
+        def __init__(self):
+            super().__init__()
 
         async def onOpen(self):
             print("Client connected...")
 
         async def onMessage(self, payload, isBinary):
             if not isBinary:
-                print("got Message")
-                x = json.loads(payload.decode('utf8'))
                 try:
-                    print(x)
+                    msg = json.loads(payload.decode('utf8'))
+                    type = msg['type']
+                    value = msg['value']
+
+                    if type == self.AUTH:
+                        self.factory.register_station(value, self)
+                    elif type == self.RFID:
+                        self.sendMessage(json.dumps({
+                            'type': self.READY,
+                            'value': ''
+                        }).encode('utf8'))
+                    elif type == self.GPIO:
+                        print("GPIO VALUE: %s" % value)
                 except Exception as e:
                     self.sendClose(1000, "Exception raised: {0}".format(e))
-                else:
-                    self.sendMessage(json.dumps(x).encode('utf8'))
+
 
     def run(self):
         ws_server_url = u"ws://127.0.0.1:9000"
