@@ -1,125 +1,126 @@
 import sys
 import asyncio
 import json
+import functools
 from autobahn.asyncio.websocket import WebSocketClientProtocol, \
     WebSocketClientFactory
 from itertools import cycle
 import MFRC522
-import RPi.GPIO as GPIO
 
 
-GPIO.setmode(GPIO.BOARD)
-GPIO.setup(18, GPIO.IN, pull_up_down = GPIO.PUD_DOWN)
+# import RPi.GPIO as GPIO
 
-STARTSTATION = 'STARTSTATION'
+# GPIO.setmode(GPIO.BOARD)
+# GPIO.setup(18, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
 
 class StartStation(object):
-
     class StationStartProtocol(WebSocketClientProtocol):
+        STARTSTATION = 'STARTSTATION'
+        READY = 'READY'
+        RESET = 'RESET'
+        AUTH = 'AUTH'
+
+        def __init__(self):
+            super().__init__()
+            self.inService = False
+            self.serverFlag = False
+            self.rfidFlag = False
+
         def onOpen(self):
-            auth = {'auth': STARTSTATION}
+            auth = {
+                'type': self.AUTH,
+                'value': self.STARTSTATION
+            }
             self.sendMessage(json.dumps(auth).encode('utf8'))
+            self.factory.loop.run_in_executor(None, functools.partial(self.sensorThread, self.callbackRFID,
+                                                                      self.callbackGPIO))
 
         def onMessage(self, payload, isBinary):
             if not isBinary:
+                try:
+                    msg = json.loads(payload.decode('utf8'))
 
-                if payload == 'kannbeginnen':
-                    serverFlag = True
-                if payload == 'reset':
-
-                res = json.loads(payload.decode('utf8'))
-                print("Result received: {}".format(res))
-                #self.sendClose()
+                    if msg['type'] == self.READY:
+                        self.serverFlag = True
+                    elif msg['type'] == self.RESET:
+                        self.reset()
+                    else:
+                        print("MSG: %s" % msg)
+                except:
+                    print("PLAINTEXTMSG: %s" % payload)
 
         def onClose(self, wasClean, code, reason):
             if reason:
                 print(reason)
-            #loop.stop()
+                self.factory.loop.stop()
+
+        def callbackGPIO(self, data):
+            # GPIO Messung
+            gpioMessage = {
+                "type": "GPIO",
+                "value": data
+            }
+            self.sendMessage(json.dumps(gpioMessage).encode('utf8'))
+
+        def callbackRFID(self, data):
+            # RFID Messung
+            rfidMessage = {
+                "type": "RFID",
+                "value": data
+            }
+            self.sendMessage(json.dumps(rfidMessage).encode('utf8'))
+
+        def handleGPIO(self, callback):
+            gpioInput = input("GPIO: ")
+            if gpioInput:
+                self.inService = True
+                callback(gpioInput)
+
+        def handleRFID(self, callback):
+            rfidInput = input("RFID: ")
+            if rfidInput:
+                print("Input: %s" % rfidInput)
+                self.rfidFlag = True
+                callback(rfidInput)
+
+        def sensorThread(self, callbackRFID, callbackGPIO):
+            rfidInput = None
+            gpioInput = None
+            while True:
+                if not self.inService:
+                    if self.rfidFlag:
+                        if self.serverFlag:
+                            self.handleGPIO(callbackGPIO)
+                        else:
+                            pass
+                            # print("Server not yet ready.")
+                    else:
+                        self.handleRFID(callbackRFID)
+
+        def reset(self):
+            self.inService = False
+            self.rfidFlag = False
+            self.serverFlag = False
 
     def __init__(self, host, port):
-        self.serverFlag = False
-        self.rfidFlag = False
         self.host = host
         self.port = port
-        self.protocol = None
 
-    def resetAll(self):
-        self.rfidFlag = False
-        self.serverFlag = False
-
-    def sendMessage(self, payload):
-        if self.protocol:
-            self.protocol.sendMessage(json.dumps(payload).encode('utf8'))
-        else:
-            print('Can not send Message.')
-
-    async def callbackRFID(self, rfid):
-        print(rfid)
-
-        rfidMessage = { "type": "RFID",
-                        "value": rfid}
-
-        self.sendMessage(json.dumps(rfidMessage).encode('utf8'))
-        # RFID empfangen
-        #pass
-
-    async def callbackGPIO(self, data):
-        # GPIO Messung
-        print(data)
-
-        gpioMessage = {
-            "type": "GPIO",
-            "value": data
-        }
-        self.sendMessage(json.dumps(gpioMessage).encode('utf8'))
-
-    async def sensorRFID(self, callback):
-
-        #rfid1 = '182.160.142.141'
-        MIFAREReader = MFRC522.MFRC522()
-
-        while True:
-            (status,TagType) = MIFAREReader.MFRC522_Request(MIFAREReader.PICC_REQIDL)
-            (status,uid) = MIFAREReader.MFRC522_Anticoll()
-            if status == MIFAREReader.MI_OK:
-                self.rfidFlag = True
-                await callback(str(uid[0])+"."+str(uid[1])+"."+str(uid[2])+"."+str(uid[3]))
-            #check here for rfid registration
-            #callback(rfid)
-            #pass
-
-
-    async def sensorGPIO(self, callback):
-        while True:
-            if self.rfidFlag == True and self.serverFlag == True:
-                if GPIO.input(18) == GPIO.HIGH :
-                    #print("sensorGPIO")
-                    await callback("1")
-
-            #check here for rfid registration
-           # print("sensorGPIO")
-            #await callback("test")
-
-
-    async def display_spinner(self, char=cycle('/|\-')):
-        while True:
-            print('\r' + next(char), flush=True, end='')
-            await asyncio.sleep(.3)
-
-    def run(self):
+    def create_factory(self):
         factory = WebSocketClientFactory('ws://%s:%s' % (self.host, self.port))
         factory.protocol = StartStation.StationStartProtocol
+        return factory
+
+    def run(self):
+        factory = self.create_factory()
         loop = asyncio.get_event_loop()
-
         coro = loop.create_connection(factory, self.host, self.port)
-        trans,prot = loop.run_until_complete(coro)
-
-        #loop.run_until_complete(self.display_spinner())
-        loop.run_until_complete(self.sensorRFID(self.callbackRFID))
-        loop.run_until_complete(self.sensorGPIO(self.callbackGPIO))
+        trans, prot = loop.run_until_complete(coro)
 
         loop.run_forever()
         loop.close()
+
 
 if __name__ == '__main__':
     host = sys.argv[1]
